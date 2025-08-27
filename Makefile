@@ -13,11 +13,11 @@ CXXFLAGS_RELEASE = -O3 -march=native -std=c++11 -Wall
 CXXFLAGS_DEBUG = -g -O0 -std=c++11 -Wall -DDEBUG
 
 # Executable names
-TARGET_RELEASE = pic3d
-TARGET_DEBUG = pic3d_debug
+TARGET_RELEASE = pic3d_stable
+TARGET_DEBUG = pic3d_stable_debug
 
 # Source files
-SOURCES = pic3d_simulation.cpp
+SOURCES = pic3d_stable.cpp
 
 # Default target
 all: release
@@ -49,7 +49,7 @@ run-debug: debug
 clean:
 	rm -f $(TARGET_RELEASE) $(TARGET_DEBUG) $(TARGET_RELEASE)_omp
 	rm -f *.o
-	rm -f pic3d_diagnostics.txt
+	rm -f pic3d_stable_diagnostics.txt
 	rm -f particles_*.txt
 	@echo "Clean complete"
 
