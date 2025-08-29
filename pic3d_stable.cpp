@@ -35,15 +35,15 @@ struct SimulationParams {
     SimulationParams() :
         nx(16), ny(16), nz(16),   // Smaller grid for stability
         dx(1.0), dy(1.0), dz(1.0), // Grid spacing = 1 Debye length
-        dt(0.01),                  // Initial time step = 0.01/ωp (much smaller)
-        dt_max(0.05),              // Maximum timestep (reduced)
+        dt(0.005),                 // Initial time step = 0.005/ωp (very small)
+        dt_max(0.01),              // Maximum timestep (very conservative)
         dt_min(0.0001),            // Minimum timestep
-        num_timesteps(100),
+        num_timesteps(200),        // More timesteps for shorter dt
         num_particles(1000),       // Fewer particles for testing
         vth(0.01),                 // Much lower thermal velocity
         wp(1.0),                   // Normalized plasma frequency
         c(1.0),                    // Speed of light (normalized)
-        cfl_factor(0.3) {}         // CFL safety factor for stability (more conservative)
+        cfl_factor(0.2) {}         // CFL safety factor for stability (very conservative)
 };
 
 // Particle structure
@@ -53,8 +53,10 @@ struct Particle {
     double q;             // Charge (normalized)
     double m;             // Mass (normalized)
     int species;          // Species identifier
+    double x_old, y_old, z_old;  // Previous position for current deposition
     
-    Particle() : x(0), y(0), z(0), vx(0), vy(0), vz(0), q(-1.0), m(1.0), species(0) {}
+    Particle() : x(0), y(0), z(0), vx(0), vy(0), vz(0), q(-1.0), m(1.0), species(0),
+                 x_old(0), y_old(0), z_old(0) {}
 };
 
 // 3D Field array class
@@ -175,6 +177,11 @@ public:
             p.vx = vth_species * normal_dist(rng);
             p.vy = vth_species * normal_dist(rng);
             p.vz = vth_species * normal_dist(rng);
+            
+            // Initialize old positions
+            p.x_old = p.x;
+            p.y_old = p.y;
+            p.z_old = p.z;
         }
     }
     
@@ -223,14 +230,20 @@ public:
     }
     
     void depositCurrent() {
+        // Improved current deposition with CIC weighting and momentum conservation
         Jx.clear();
         Jy.clear();
         Jz.clear();
         
         for (const auto& p : particles) {
-            double x_norm = p.x / params.dx;
-            double y_norm = p.y / params.dy;
-            double z_norm = p.z / params.dz;
+            // Use average position for current deposition (momentum-conserving)
+            double x_avg = 0.5 * (p.x + p.x_old);
+            double y_avg = 0.5 * (p.y + p.y_old);
+            double z_avg = 0.5 * (p.z + p.z_old);
+            
+            double x_norm = x_avg / params.dx;
+            double y_norm = y_avg / params.dy;
+            double z_norm = z_avg / params.dz;
             
             int i = static_cast<int>(x_norm);
             int j = static_cast<int>(y_norm);
@@ -242,101 +255,365 @@ public:
             
             // Current weight
             double weight = p.q * params.nx * params.ny * params.nz / params.num_particles;
+            
+            // Current components (using velocity at n+1/2)
             double jx = weight * p.vx;
             double jy = weight * p.vy;
             double jz = weight * p.vz;
             
-            // Simplified deposition (not charge-conserving)
-            Jx(i,   j,   k  ) += jx * (1-fy) * (1-fz) * 0.5;
-            Jx(i+1, j,   k  ) += jx * (1-fy) * (1-fz) * 0.5;
+            // CIC deposition for Jx (on x-faces)
+            Jx(i,   j,   k  ) += jx * (1-fx) * (1-fy) * (1-fz);
+            Jx(i+1, j,   k  ) += jx * fx     * (1-fy) * (1-fz);
+            Jx(i,   j+1, k  ) += jx * (1-fx) * fy     * (1-fz);
+            Jx(i+1, j+1, k  ) += jx * fx     * fy     * (1-fz);
+            Jx(i,   j,   k+1) += jx * (1-fx) * (1-fy) * fz;
+            Jx(i+1, j,   k+1) += jx * fx     * (1-fy) * fz;
+            Jx(i,   j+1, k+1) += jx * (1-fx) * fy     * fz;
+            Jx(i+1, j+1, k+1) += jx * fx     * fy     * fz;
             
-            Jy(i,   j,   k  ) += jy * (1-fx) * (1-fz) * 0.5;
-            Jy(i,   j+1, k  ) += jy * (1-fx) * (1-fz) * 0.5;
+            // CIC deposition for Jy (on y-faces)
+            Jy(i,   j,   k  ) += jy * (1-fx) * (1-fy) * (1-fz);
+            Jy(i+1, j,   k  ) += jy * fx     * (1-fy) * (1-fz);
+            Jy(i,   j+1, k  ) += jy * (1-fx) * fy     * (1-fz);
+            Jy(i+1, j+1, k  ) += jy * fx     * fy     * (1-fz);
+            Jy(i,   j,   k+1) += jy * (1-fx) * (1-fy) * fz;
+            Jy(i+1, j,   k+1) += jy * fx     * (1-fy) * fz;
+            Jy(i,   j+1, k+1) += jy * (1-fx) * fy     * fz;
+            Jy(i+1, j+1, k+1) += jy * fx     * fy     * fz;
             
-            Jz(i,   j,   k  ) += jz * (1-fx) * (1-fy) * 0.5;
-            Jz(i,   j,   k+1) += jz * (1-fx) * (1-fy) * 0.5;
+            // CIC deposition for Jz (on z-faces)
+            Jz(i,   j,   k  ) += jz * (1-fx) * (1-fy) * (1-fz);
+            Jz(i+1, j,   k  ) += jz * fx     * (1-fy) * (1-fz);
+            Jz(i,   j+1, k  ) += jz * (1-fx) * fy     * (1-fz);
+            Jz(i+1, j+1, k  ) += jz * fx     * fy     * (1-fz);
+            Jz(i,   j,   k+1) += jz * (1-fx) * (1-fy) * fz;
+            Jz(i+1, j,   k+1) += jz * fx     * (1-fy) * fz;
+            Jz(i,   j+1, k+1) += jz * (1-fx) * fy     * fz;
+            Jz(i+1, j+1, k+1) += jz * fx     * fy     * fz;
+        }
+        
+        // Apply smoothing filter to reduce high-frequency noise
+        smoothCurrents();
+    }
+    
+    void smoothCurrents() {
+        // Simple 3-point smoothing filter for stability
+        Field3D Jx_temp = Jx;
+        Field3D Jy_temp = Jy;
+        Field3D Jz_temp = Jz;
+        
+        double alpha = 0.25;  // Smoothing strength
+        
+        // Smooth Jx
+        for (int i = 1; i < params.nx; ++i) {
+            for (int j = 1; j < params.ny-1; ++j) {
+                for (int k = 1; k < params.nz-1; ++k) {
+                    Jx(i,j,k) = (1-2*alpha) * Jx_temp(i,j,k) +
+                               alpha * (Jx_temp(i,j+1,k) + Jx_temp(i,j-1,k));
+                }
+            }
+        }
+        
+        // Smooth Jy
+        for (int i = 1; i < params.nx-1; ++i) {
+            for (int j = 1; j < params.ny; ++j) {
+                for (int k = 1; k < params.nz-1; ++k) {
+                    Jy(i,j,k) = (1-2*alpha) * Jy_temp(i,j,k) +
+                               alpha * (Jy_temp(i+1,j,k) + Jy_temp(i-1,j,k));
+                }
+            }
+        }
+        
+        // Smooth Jz
+        for (int i = 1; i < params.nx-1; ++i) {
+            for (int j = 1; j < params.ny-1; ++j) {
+                for (int k = 1; k < params.nz; ++k) {
+                    Jz(i,j,k) = (1-2*alpha) * Jz_temp(i,j,k) +
+                               alpha * (Jz_temp(i+1,j,k) + Jz_temp(i-1,j,k));
+                }
+            }
         }
     }
     
     void updateEField() {
-        double c2dt = params.dt;  // In normalized units
+        // Energy-conserving E field update using Faraday's law
+        // E^{n+1} = E^n + c^2 dt (∇ × B^{n+1/2} - J^{n+1/2})
+        double c2dt = params.dt * params.c * params.c;  // c^2 * dt
         
-        // Update Ex
+        // Update Ex on (i+1/2, j, k) edges
         for (int i = 0; i <= params.nx; ++i) {
             for (int j = 0; j < params.ny; ++j) {
                 for (int k = 0; k < params.nz; ++k) {
-                    Ex(i,j,k) += c2dt * (
-                        (Bz(i,j+1,k) - Bz(i,j,k)) / params.dy -
-                        (By(i,j,k+1) - By(i,j,k)) / params.dz -
-                        Jx(i,j,k)
-                    );
+                    // Curl of B using centered differences
+                    double curl_Bx = (Bz(i,j+1,k) - Bz(i,j,k)) / params.dy -
+                                     (By(i,j,k+1) - By(i,j,k)) / params.dz;
+                    Ex(i,j,k) += c2dt * (curl_Bx - Jx(i,j,k));
                 }
             }
         }
         
-        // Update Ey
+        // Update Ey on (i, j+1/2, k) edges
         for (int i = 0; i < params.nx; ++i) {
             for (int j = 0; j <= params.ny; ++j) {
                 for (int k = 0; k < params.nz; ++k) {
-                    Ey(i,j,k) += c2dt * (
-                        (Bx(i,j,k+1) - Bx(i,j,k)) / params.dz -
-                        (Bz(i+1,j,k) - Bz(i,j,k)) / params.dx -
-                        Jy(i,j,k)
-                    );
+                    // Curl of B using centered differences
+                    double curl_By = (Bx(i,j,k+1) - Bx(i,j,k)) / params.dz -
+                                     (Bz(i+1,j,k) - Bz(i,j,k)) / params.dx;
+                    Ey(i,j,k) += c2dt * (curl_By - Jy(i,j,k));
                 }
             }
         }
         
-        // Update Ez
+        // Update Ez on (i, j, k+1/2) edges
         for (int i = 0; i < params.nx; ++i) {
             for (int j = 0; j < params.ny; ++j) {
                 for (int k = 0; k <= params.nz; ++k) {
-                    Ez(i,j,k) += c2dt * (
-                        (By(i+1,j,k) - By(i,j,k)) / params.dx -
-                        (Bx(i,j+1,k) - Bx(i,j,k)) / params.dy -
-                        Jz(i,j,k)
-                    );
+                    // Curl of B using centered differences
+                    double curl_Bz = (By(i+1,j,k) - By(i,j,k)) / params.dx -
+                                     (Bx(i,j+1,k) - Bx(i,j,k)) / params.dy;
+                    Ez(i,j,k) += c2dt * (curl_Bz - Jz(i,j,k));
+                }
+            }
+        }
+    }
+    
+    void updateBFieldHalfStep() {
+        // Energy-conserving B field half-step update using Ampere's law
+        // B^{n+1/2} = B^{n-1/2} - dt/2 ∇ × E^n
+        double dt_half = 0.5 * params.dt;
+        
+        // Update Bx on (i, j+1/2, k+1/2) faces
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    // Use boundary-safe indexing
+                    int jm = (j > 0) ? j - 1 : params.ny - 1;
+                    int km = (k > 0) ? k - 1 : params.nz - 1;
+                    
+                    // Curl of E using centered differences
+                    double curl_Ex = (Ez(i,j,k) - Ez(i,jm,k)) / params.dy -
+                                     (Ey(i,j,k) - Ey(i,j,km)) / params.dz;
+                    Bx(i,j,k) -= dt_half * curl_Ex;
+                }
+            }
+        }
+        
+        // Update By on (i+1/2, j, k+1/2) faces
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    // Use boundary-safe indexing
+                    int im = (i > 0) ? i - 1 : params.nx - 1;
+                    int km = (k > 0) ? k - 1 : params.nz - 1;
+                    
+                    // Curl of E using centered differences
+                    double curl_Ey = (Ex(i,j,k) - Ex(i,j,km)) / params.dz -
+                                     (Ez(i,j,k) - Ez(im,j,k)) / params.dx;
+                    By(i,j,k) -= dt_half * curl_Ey;
+                }
+            }
+        }
+        
+        // Update Bz on (i+1/2, j+1/2, k) faces
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    // Use boundary-safe indexing
+                    int im = (i > 0) ? i - 1 : params.nx - 1;
+                    int jm = (j > 0) ? j - 1 : params.ny - 1;
+                    
+                    // Curl of E using centered differences
+                    double curl_Ez = (Ey(i,j,k) - Ey(im,j,k)) / params.dx -
+                                     (Ex(i,j,k) - Ex(i,jm,k)) / params.dy;
+                    Bz(i,j,k) -= dt_half * curl_Ez;
                 }
             }
         }
     }
     
     void updateBField() {
-        // Update Bx
+        // Full step B field update (two half steps)
+        updateBFieldHalfStep();
+        updateBFieldHalfStep();
+    }
+    
+    double calculateDivergenceB(int i, int j, int k) {
+        // Calculate ∇·B at cell center (i,j,k)
+        double divB = (Bx(i+1,j,k) - Bx(i,j,k)) / params.dx +
+                      (By(i,j+1,k) - By(i,j,k)) / params.dy +
+                      (Bz(i,j,k+1) - Bz(i,j,k)) / params.dz;
+        return divB;
+    }
+    
+    double calculateDivergenceE(int i, int j, int k) {
+        // Calculate ∇·E at cell center (i,j,k)
+        double divE = (Ex(i+1,j,k) - Ex(i,j,k)) / params.dx +
+                      (Ey(i,j+1,k) - Ey(i,j,k)) / params.dy +
+                      (Ez(i,j,k+1) - Ez(i,j,k)) / params.dz;
+        return divE;
+    }
+    
+    void cleanDivergenceB() {
+        // Project B field to ensure ∇·B = 0
+        // Using a simple iterative projection method (Helmholtz decomposition)
+        
+        Field3D phi(params.nx, params.ny, params.nz);  // Scalar potential
+        Field3D phi_new(params.nx, params.ny, params.nz);
+        
+        // Calculate divergence errors
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    phi(i,j,k) = calculateDivergenceB(i, j, k);
+                }
+            }
+        }
+        
+        // Solve Poisson equation ∇²φ = ∇·B using Jacobi iteration
+        double h2 = params.dx * params.dx;  // Assuming dx=dy=dz
+        double omega = 1.0;  // Relaxation parameter
+        
+        for (int iter = 0; iter < 20; ++iter) {
+            for (int i = 0; i < params.nx; ++i) {
+                for (int j = 0; j < params.ny; ++j) {
+                    for (int k = 0; k < params.nz; ++k) {
+                        double sum = phi(i+1,j,k) + phi(i-1,j,k) +
+                                    phi(i,j+1,k) + phi(i,j-1,k) +
+                                    phi(i,j,k+1) + phi(i,j,k-1);
+                        phi_new(i,j,k) = (1-omega) * phi(i,j,k) +
+                                        omega * (sum - h2 * calculateDivergenceB(i,j,k)) / 6.0;
+                    }
+                }
+            }
+            std::swap(phi, phi_new);
+        }
+        
+        // Correct B field: B_corrected = B - ∇φ
         for (int i = 0; i < params.nx; ++i) {
             for (int j = 0; j <= params.ny; ++j) {
                 for (int k = 0; k <= params.nz; ++k) {
-                    Bx(i,j,k) -= params.dt * (
-                        (Ez(i,j,k) - Ez(i,j-1,k)) / params.dy -
-                        (Ey(i,j,k) - Ey(i,j,k-1)) / params.dz
-                    );
+                    // Bx correction using gradient in x direction
+                    if (i > 0) {
+                        Bx(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i-1,j,k)) / params.dx;
+                    }
                 }
             }
         }
         
-        // Update By
         for (int i = 0; i <= params.nx; ++i) {
             for (int j = 0; j < params.ny; ++j) {
                 for (int k = 0; k <= params.nz; ++k) {
-                    By(i,j,k) -= params.dt * (
-                        (Ex(i,j,k) - Ex(i,j,k-1)) / params.dz -
-                        (Ez(i,j,k) - Ez(i-1,j,k)) / params.dx
-                    );
+                    // By correction using gradient in y direction
+                    if (j > 0) {
+                        By(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i,j-1,k)) / params.dy;
+                    }
                 }
             }
         }
         
-        // Update Bz
         for (int i = 0; i <= params.nx; ++i) {
             for (int j = 0; j <= params.ny; ++j) {
                 for (int k = 0; k < params.nz; ++k) {
-                    Bz(i,j,k) -= params.dt * (
-                        (Ey(i,j,k) - Ey(i-1,j,k)) / params.dx -
-                        (Ex(i,j,k) - Ex(i,j-1,k)) / params.dy
-                    );
+                    // Bz correction using gradient in z direction
+                    if (k > 0) {
+                        Bz(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i,j,k-1)) / params.dz;
+                    }
                 }
             }
         }
+    }
+    
+    void cleanDivergenceE() {
+        // Correct E field to satisfy Gauss's law: ∇·E = ρ/ε₀
+        // In normalized units: ∇·E = ρ
+        
+        Field3D phi(params.nx, params.ny, params.nz);  // Scalar potential
+        Field3D phi_new(params.nx, params.ny, params.nz);
+        Field3D divE_error(params.nx, params.ny, params.nz);
+        
+        // Calculate divergence error: ∇·E - ρ
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    double divE = calculateDivergenceE(i, j, k);
+                    divE_error(i,j,k) = divE - rho(i,j,k);
+                    phi(i,j,k) = divE_error(i,j,k);
+                }
+            }
+        }
+        
+        // Solve Poisson equation ∇²φ = (∇·E - ρ) using Jacobi iteration
+        double h2 = params.dx * params.dx;  // Assuming dx=dy=dz
+        double omega = 1.0;  // Relaxation parameter
+        
+        for (int iter = 0; iter < 20; ++iter) {
+            for (int i = 0; i < params.nx; ++i) {
+                for (int j = 0; j < params.ny; ++j) {
+                    for (int k = 0; k < params.nz; ++k) {
+                        double sum = phi(i+1,j,k) + phi(i-1,j,k) +
+                                    phi(i,j+1,k) + phi(i,j-1,k) +
+                                    phi(i,j,k+1) + phi(i,j,k-1);
+                        phi_new(i,j,k) = (1-omega) * phi(i,j,k) +
+                                        omega * (sum - h2 * divE_error(i,j,k)) / 6.0;
+                    }
+                }
+            }
+            std::swap(phi, phi_new);
+        }
+        
+        // Correct E field: E_corrected = E - ∇φ
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    // Ex correction
+                    if (i > 0 && i < params.nx) {
+                        Ex(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i-1,j,k)) / params.dx;
+                    }
+                }
+            }
+        }
+        
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    // Ey correction
+                    if (j > 0 && j < params.ny) {
+                        Ey(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i,j-1,k)) / params.dy;
+                    }
+                }
+            }
+        }
+        
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    // Ez correction
+                    if (k > 0 && k < params.nz) {
+                        Ez(i,j,k) -= 0.5 * (phi(i,j,k) - phi(i,j,k-1)) / params.dz;
+                    }
+                }
+            }
+        }
+    }
+    
+    double calculateMaxDivergenceErrors() {
+        double max_divB = 0.0;
+        double max_divE_error = 0.0;
+        
+        for (int i = 1; i < params.nx-1; ++i) {
+            for (int j = 1; j < params.ny-1; ++j) {
+                for (int k = 1; k < params.nz-1; ++k) {
+                    double divB = std::abs(calculateDivergenceB(i, j, k));
+                    double divE = calculateDivergenceE(i, j, k);
+                    double divE_error = std::abs(divE - rho(i,j,k));
+                    
+                    max_divB = std::max(max_divB, divB);
+                    max_divE_error = std::max(max_divE_error, divE_error);
+                }
+            }
+        }
+        
+        return std::max(max_divB, max_divE_error);
     }
     
     void interpolateFields(const Particle& p, double& Ex_p, double& Ey_p, double& Ez_p,
@@ -432,6 +709,11 @@ public:
             p.vx = vx_plus + qdt_2m * Ex_p;
             p.vy = vy_plus + qdt_2m * Ey_p;
             p.vz = vz_plus + qdt_2m * Ez_p;
+            
+            // Store old position for current deposition
+            p.x_old = p.x;
+            p.y_old = p.y;
+            p.z_old = p.z;
             
             // Update position
             p.x += p.vx * params.dt;
@@ -643,7 +925,7 @@ public:
         std::cout << "CFL-adjusted dt = " << params.dt << " (1/ωp)\n\n";
         
         std::ofstream outfile("pic3d_stable_diagnostics.txt");
-        outfile << "# Step, Time, dt, Total_Energy, Energy_Error(%), Max_Velocity\n";
+        outfile << "# Step, Time, dt, Total_Energy, Energy_Error(%), Max_Velocity, Max_DivError\n";
         
         double initial_energy = calculateTotalEnergy();
         double simulation_time = 0.0;
@@ -652,11 +934,21 @@ public:
             // Adjust timestep based on CFL condition
             adjustTimestep();
             
-            depositCurrent();
-            updateBField();
-            updateEField();
-            updateBField();
+            // Symplectic leapfrog integration for energy conservation:
+            // 1. Update B by half timestep: B^{n-1/2} -> B^{n}
+            updateBFieldHalfStep();
+            
+            // 2. Push particles: x^n -> x^{n+1}, v^{n-1/2} -> v^{n+1/2}
             pushParticles();
+            
+            // 3. Deposit current at time n+1/2 using v^{n+1/2}
+            depositCurrent();
+            
+            // 4. Update E field: E^n -> E^{n+1}
+            updateEField();
+            
+            // 5. Update B by half timestep: B^n -> B^{n+1/2}
+            updateBFieldHalfStep();
             
             simulation_time += params.dt;
             
@@ -664,16 +956,19 @@ public:
                 double energy = calculateTotalEnergy();
                 double energy_error = (energy - initial_energy) / initial_energy;
                 double v_max = calculateMaxParticleVelocity();
+                double max_div_error = calculateMaxDivergenceErrors();
                 
                 std::cout << "Step " << step << "/" << params.num_timesteps
                          << " | Time: " << std::fixed << std::setprecision(3) << simulation_time
                          << " | dt: " << std::scientific << std::setprecision(2) << params.dt
                          << " | Energy: " << std::fixed << std::setprecision(6) << energy
                          << " | Error: " << std::setprecision(2) << energy_error * 100 << "%"
-                         << " | v_max: " << std::scientific << v_max << "\n";
+                         << " | v_max: " << std::scientific << v_max
+                         << " | div_err: " << max_div_error << "\n";
                 
                 outfile << step << " " << simulation_time << " " << params.dt << " "
-                       << energy << " " << energy_error * 100 << " " << v_max << "\n";
+                       << energy << " " << energy_error * 100 << " " << v_max << " "
+                       << max_div_error << "\n";
             }
         }
         
