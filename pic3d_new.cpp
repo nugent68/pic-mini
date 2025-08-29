@@ -371,17 +371,171 @@ public:
         double y_norm = particles.y[p_idx] / params.dy;
         double z_norm = particles.z[p_idx] / params.dz;
         
-        // Simplified interpolation (nearest grid point for testing)
-        int i = static_cast<int>(x_norm + 0.5);
-        int j = static_cast<int>(y_norm + 0.5);
-        int k = static_cast<int>(z_norm + 0.5);
+        // Proper CIC (Cloud-In-Cell) interpolation for fields
+        int i = static_cast<int>(x_norm);
+        int j = static_cast<int>(y_norm);
+        int k = static_cast<int>(z_norm);
         
-        Ex_p = Ex(i, j, k);
-        Ey_p = Ey(i, j, k);
-        Ez_p = Ez(i, j, k);
-        Bx_p = Bx(i, j, k);
-        By_p = By(i, j, k);
-        Bz_p = Bz(i, j, k);
+        double fx = x_norm - i;
+        double fy = y_norm - j;
+        double fz = z_norm - k;
+        
+        // Interpolate E field (staggered grid)
+        // Ex is on (i+1/2, j, k) faces
+        Ex_p = Ex(i,j,k) * (1-fy) * (1-fz)
+             + Ex(i,j+1,k) * fy * (1-fz)
+             + Ex(i,j,k+1) * (1-fy) * fz
+             + Ex(i,j+1,k+1) * fy * fz;
+        
+        // Ey is on (i, j+1/2, k) faces
+        Ey_p = Ey(i,j,k) * (1-fx) * (1-fz)
+             + Ey(i+1,j,k) * fx * (1-fz)
+             + Ey(i,j,k+1) * (1-fx) * fz
+             + Ey(i+1,j,k+1) * fx * fz;
+        
+        // Ez is on (i, j, k+1/2) faces
+        Ez_p = Ez(i,j,k) * (1-fx) * (1-fy)
+             + Ez(i+1,j,k) * fx * (1-fy)
+             + Ez(i,j+1,k) * (1-fx) * fy
+             + Ez(i+1,j+1,k) * fx * fy;
+        
+        // Interpolate B field (also staggered)
+        // Bx is on (i, j+1/2, k+1/2) edges
+        Bx_p = Bx(i,j,k) * (1-fy) * (1-fz)
+             + Bx(i,j+1,k) * fy * (1-fz)
+             + Bx(i,j,k+1) * (1-fy) * fz
+             + Bx(i,j+1,k+1) * fy * fz;
+        
+        // By is on (i+1/2, j, k+1/2) edges
+        By_p = By(i,j,k) * (1-fx) * (1-fz)
+             + By(i+1,j,k) * fx * (1-fz)
+             + By(i,j,k+1) * (1-fx) * fz
+             + By(i+1,j,k+1) * fx * fz;
+        
+        // Bz is on (i+1/2, j+1/2, k) edges
+        Bz_p = Bz(i,j,k) * (1-fx) * (1-fy)
+             + Bz(i+1,j,k) * fx * (1-fy)
+             + Bz(i,j+1,k) * (1-fx) * fy
+             + Bz(i+1,j+1,k) * fx * fy;
+    }
+    
+    double calculateMaxParticleVelocity() {
+        double v_max = 0.0;
+        for (int p = 0; p < particles.size(); ++p) {
+            double v = std::sqrt(particles.vx[p]*particles.vx[p] +
+                               particles.vy[p]*particles.vy[p] +
+                               particles.vz[p]*particles.vz[p]);
+            if (v > v_max) {
+                v_max = v;
+            }
+        }
+        return v_max;
+    }
+    
+    double calculateMaxFieldStrength() {
+        double e_max = 0.0;
+        double b_max = 0.0;
+        
+        // Check E field maximum
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    double e = std::abs(Ex(i,j,k));
+                    if (e > e_max) e_max = e;
+                }
+            }
+        }
+        
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    double e = std::abs(Ey(i,j,k));
+                    if (e > e_max) e_max = e;
+                }
+            }
+        }
+        
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    double e = std::abs(Ez(i,j,k));
+                    if (e > e_max) e_max = e;
+                }
+            }
+        }
+        
+        // Check B field maximum
+        for (int i = 0; i < params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    double b = std::abs(Bx(i,j,k));
+                    if (b > b_max) b_max = b;
+                }
+            }
+        }
+        
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j < params.ny; ++j) {
+                for (int k = 0; k <= params.nz; ++k) {
+                    double b = std::abs(By(i,j,k));
+                    if (b > b_max) b_max = b;
+                }
+            }
+        }
+        
+        for (int i = 0; i <= params.nx; ++i) {
+            for (int j = 0; j <= params.ny; ++j) {
+                for (int k = 0; k < params.nz; ++k) {
+                    double b = std::abs(Bz(i,j,k));
+                    if (b > b_max) b_max = b;
+                }
+            }
+        }
+        
+        return std::max(e_max, b_max);
+    }
+    
+    double calculateCFLTimestep() {
+        // CFL condition for electromagnetic waves: dt < dx/c * 1/sqrt(3) for 3D
+        double dx_min = std::min({params.dx, params.dy, params.dz});
+        double dt_em = params.cfl_factor * dx_min / (params.c * std::sqrt(3.0));
+        
+        // CFL condition for particle motion: dt < dx/v_max
+        double v_max = calculateMaxParticleVelocity();
+        double dt_particle = std::numeric_limits<double>::max();
+        if (v_max > 1e-10) {  // Avoid division by zero
+            dt_particle = params.cfl_factor * dx_min / v_max;
+        }
+        
+        // Constraint based on plasma frequency (need to resolve plasma oscillations)
+        double dt_plasma = params.cfl_factor * 2.0 * M_PI / params.wp;
+        
+        // Constraint based on cyclotron frequency (if B field present)
+        double b_max = calculateMaxFieldStrength();
+        double dt_cyclotron = std::numeric_limits<double>::max();
+        if (b_max > 1e-10) {  // Avoid division by zero
+            // Electron cyclotron frequency: ωc = eB/m
+            double omega_c = b_max;  // In normalized units
+            dt_cyclotron = params.cfl_factor * 2.0 * M_PI / omega_c;
+        }
+        
+        // Take minimum of all constraints
+        double dt_new = std::min({dt_em, dt_particle, dt_plasma, dt_cyclotron});
+        
+        // Apply limits
+        dt_new = std::max(dt_new, params.dt_min);
+        dt_new = std::min(dt_new, params.dt_max);
+        
+        return dt_new;
+    }
+    
+    void adjustTimestep() {
+        double dt_old = params.dt;
+        params.dt = calculateCFLTimestep();
+        
+        if (std::abs(params.dt - dt_old) / dt_old > 0.1) {
+            std::cout << "  [CFL] Timestep adjusted: " << dt_old << " -> " << params.dt << "\n";
+        }
     }
     
     void pushParticles() {
@@ -504,39 +658,56 @@ public:
     }
     
     void run() {
-        std::cout << "Starting 3D PIC Simulation with Struct-of-Arrays (SoA)\n";
+        std::cout << "Starting 3D PIC Simulation with Struct-of-Arrays (SoA) and CFL Control\n";
         std::cout << "Grid: " << params.nx << "x" << params.ny << "x" << params.nz << "\n";
         std::cout << "Particles: " << params.num_particles << "\n";
         std::cout << "Time steps: " << params.num_timesteps << "\n";
-        std::cout << "dt = " << params.dt << " (1/ωp)\n\n";
+        std::cout << "Initial dt = " << params.dt << " (1/ωp)\n";
+        std::cout << "CFL safety factor = " << params.cfl_factor << "\n\n";
+        
+        // Calculate initial CFL timestep
+        params.dt = calculateCFLTimestep();
+        std::cout << "CFL-adjusted dt = " << params.dt << " (1/ωp)\n\n";
         
         std::ofstream outfile("pic3d_soa_diagnostics.txt");
-        outfile << "# Step, Time, Total_Energy\n";
+        outfile << "# Step, Time, dt, Total_Energy, Energy_Error(%), Max_Velocity\n";
         
         double initial_energy = calculateTotalEnergy();
+        double simulation_time = 0.0;
         
         for (int step = 0; step < params.num_timesteps; ++step) {
+            // Adjust timestep based on CFL condition
+            adjustTimestep();
+            
             depositCurrent();
             updateBField();
             updateEField();
             updateBField();
             pushParticles();
             
+            simulation_time += params.dt;
+            
             if (step % 10 == 0) {
                 double energy = calculateTotalEnergy();
                 double energy_error = (energy - initial_energy) / initial_energy;
+                double v_max = calculateMaxParticleVelocity();
                 
-                std::cout << "Step " << step << "/" << params.num_timesteps 
-                         << " | Energy: " << energy 
-                         << " | Error: " << energy_error * 100 << "%\n";
+                std::cout << "Step " << step << "/" << params.num_timesteps
+                         << " | Time: " << std::fixed << std::setprecision(3) << simulation_time
+                         << " | dt: " << std::scientific << std::setprecision(2) << params.dt
+                         << " | Energy: " << std::fixed << std::setprecision(6) << energy
+                         << " | Error: " << std::setprecision(2) << energy_error * 100 << "%"
+                         << " | v_max: " << std::scientific << v_max << "\n";
                 
-                outfile << step << " " << step * params.dt << " " << energy << "\n";
+                outfile << step << " " << simulation_time << " " << params.dt << " "
+                       << energy << " " << energy_error * 100 << " " << v_max << "\n";
             }
         }
         
         outfile.close();
         saveParticlePositions("particles_soa_final.txt");
         std::cout << "\nSimulation complete.\n";
+        std::cout << "Final simulation time: " << simulation_time << " (1/ωp)\n";
     }
     
     void saveParticlePositions(const std::string& filename) {
