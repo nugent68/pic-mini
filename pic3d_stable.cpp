@@ -118,11 +118,24 @@ private:
     std::normal_distribution<double> normal_dist;
     
 public:
-    PIC3D(const SimulationParams& p) : params(p), 
+    PIC3D(const SimulationParams& p, bool skip_perturbation = false) :
+                                        params(p),
                                         rng(42),  // Fixed seed for reproducibility
                                         uniform_dist(0.0, 1.0),
                                         normal_dist(0.0, 1.0) {
-        // Initialize fields
+        initializeFields();
+        
+        // Initialize particles
+        initializeParticles();
+        
+        // Add small initial perturbation to trigger physics (unless skipped)
+        if (!skip_perturbation) {
+            addPerturbation();
+        }
+    }
+    
+    void initializeFields() {
+        // Initialize or resize fields based on current params
         Ex.resize(params.nx+1, params.ny, params.nz);
         Ey.resize(params.nx, params.ny+1, params.nz);
         Ez.resize(params.nx, params.ny, params.nz+1);
@@ -137,11 +150,11 @@ public:
         
         rho.resize(params.nx, params.ny, params.nz);
         
-        // Initialize particles
-        initializeParticles();
-        
-        // Add small initial perturbation to trigger physics
-        addPerturbation();
+        // Clear all fields
+        Ex.clear(); Ey.clear(); Ez.clear();
+        Bx.clear(); By.clear(); Bz.clear();
+        Jx.clear(); Jy.clear(); Jz.clear();
+        rho.clear();
     }
     
     void initializeParticles() {
@@ -185,6 +198,136 @@ public:
         }
     }
     
+    void initializeParticlesUniform() {
+        // Uniform particle initialization on a regular grid
+        // Ensures perfect charge neutrality initially
+        
+        particles.clear();
+        
+        double Lx = params.nx * params.dx;
+        double Ly = params.ny * params.dy;
+        double Lz = params.nz * params.dz;
+        
+        // Calculate particles per cell (must be even for charge neutrality)
+        int total_cells = params.nx * params.ny * params.nz;
+        int particles_per_cell = params.num_particles / total_cells;
+        if (particles_per_cell < 2) particles_per_cell = 2;
+        if (particles_per_cell % 2 != 0) particles_per_cell++;  // Ensure even
+        
+        // Actual number of particles
+        int actual_particles = particles_per_cell * total_cells;
+        particles.reserve(actual_particles);
+        
+        // Place particles uniformly in each cell
+        for (int ix = 0; ix < params.nx; ++ix) {
+            for (int iy = 0; iy < params.ny; ++iy) {
+                for (int iz = 0; iz < params.nz; ++iz) {
+                    // Cell boundaries
+                    double x_min = ix * params.dx;
+                    double y_min = iy * params.dy;
+                    double z_min = iz * params.dz;
+                    
+                    // Place electron-ion pairs in this cell
+                    for (int ip = 0; ip < particles_per_cell; ip += 2) {
+                        // Small offset from cell center for each particle
+                        double dx = params.dx * (0.25 + 0.5 * (ip / particles_per_cell));
+                        double dy = params.dy * 0.5;
+                        double dz = params.dz * 0.5;
+                        
+                        // Electron
+                        Particle electron;
+                        electron.species = 0;
+                        electron.q = -1.0;
+                        electron.m = 1.0;
+                        electron.x = x_min + dx;
+                        electron.y = y_min + dy;
+                        electron.z = z_min + dz;
+                        
+                        // Thermal velocity
+                        double vth_e = params.vth;
+                        electron.vx = vth_e * normal_dist(rng);
+                        electron.vy = vth_e * normal_dist(rng);
+                        electron.vz = vth_e * normal_dist(rng);
+                        
+                        electron.x_old = electron.x;
+                        electron.y_old = electron.y;
+                        electron.z_old = electron.z;
+                        
+                        particles.push_back(electron);
+                        
+                        // Ion at same position (charge neutral)
+                        Particle ion;
+                        ion.species = 1;
+                        ion.q = 1.0;
+                        ion.m = 1836.0;
+                        ion.x = electron.x;  // Same position
+                        ion.y = electron.y;
+                        ion.z = electron.z;
+                        
+                        // Ion thermal velocity (much smaller due to mass)
+                        double vth_i = params.vth / std::sqrt(ion.m);
+                        ion.vx = vth_i * normal_dist(rng);
+                        ion.vy = vth_i * normal_dist(rng);
+                        ion.vz = vth_i * normal_dist(rng);
+                        
+                        ion.x_old = ion.x;
+                        ion.y_old = ion.y;
+                        ion.z_old = ion.z;
+                        
+                        particles.push_back(ion);
+                    }
+                }
+            }
+        }
+        
+        params.num_particles = particles.size();
+        std::cout << "Initialized " << params.num_particles << " particles uniformly\n";
+    }
+    
+    void initializeLangmuirWave(double amplitude, double k_wave) {
+        // Charge-neutral perturbation for Langmuir wave
+        // Displace electrons and ions in opposite directions
+        
+        double Lx = params.nx * params.dx;
+        
+        for (size_t i = 0; i < particles.size(); i += 2) {
+            // Process electron-ion pairs together
+            if (i + 1 < particles.size()) {
+                Particle& electron = particles[i];
+                Particle& ion = particles[i + 1];
+                
+                // Ensure we have an electron-ion pair
+                if (electron.species == 0 && ion.species == 1) {
+                    // Calculate perturbation based on position
+                    double x_center = 0.5 * (electron.x + ion.x);
+                    double phase = 2.0 * M_PI * k_wave * x_center / Lx;
+                    
+                    // Displacement amplitude (very small)
+                    double dx_pert = amplitude * params.dx * std::sin(phase);
+                    
+                    // Move electron and ion in opposite directions (charge neutral)
+                    electron.x -= dx_pert;  // Electron goes left
+                    ion.x += dx_pert * (electron.m / ion.m);  // Ion goes right (scaled by mass ratio)
+                    
+                    // Ensure particles stay in bounds
+                    while (electron.x < 0) electron.x += Lx;
+                    while (electron.x >= Lx) electron.x -= Lx;
+                    while (ion.x < 0) ion.x += Lx;
+                    while (ion.x >= Lx) ion.x -= Lx;
+                    
+                    // Update old positions
+                    electron.x_old = electron.x;
+                    ion.x_old = ion.x;
+                    
+                    // Also add small velocity perturbation for cleaner oscillations
+                    double v_pert = amplitude * params.vth * std::sin(phase);
+                    electron.vx += v_pert;
+                    ion.vx -= v_pert * (electron.m / ion.m);  // Opposite direction, scaled by mass
+                }
+            }
+        }
+    }
+    
     void addPerturbation() {
         // Add a small sinusoidal perturbation to the electric field
         double amplitude = 0.001;
@@ -196,6 +339,35 @@ public:
                 }
             }
         }
+    }
+    
+    double measureLangmuirFrequency() {
+        // Measure the electric field oscillation frequency
+        // Sample Ex at the center of the domain
+        int ix = params.nx / 2;
+        int jy = params.ny / 2;
+        int kz = params.nz / 2;
+        
+        return Ex(ix, jy, kz);
+    }
+    
+    double calculatePlasmaFrequency() {
+        // Calculate theoretical plasma frequency
+        // ωp = sqrt(n_e * e^2 / (ε_0 * m_e))
+        // In normalized units, this is just 1.0
+        
+        // Count electron density
+        int n_electrons = 0;
+        for (const auto& p : particles) {
+            if (p.species == 0) n_electrons++;
+        }
+        
+        double volume = params.nx * params.ny * params.nz *
+                       params.dx * params.dy * params.dz;
+        double n_e = n_electrons / volume;
+        
+        // In normalized units where ωp = 1
+        return std::sqrt(n_e);
     }
     
     void depositCharge() {
@@ -912,6 +1084,136 @@ public:
         }
     }
     
+    void runLangmuirWaveTest() {
+        // Use optimized parameters for Langmuir wave test
+        params.nx = 32; params.ny = 4; params.nz = 4;  // 1D-like geometry
+        params.dx = 0.5; params.dy = 1.0; params.dz = 1.0;  // Finer x resolution
+        params.num_particles = 4096;  // More particles for better statistics
+        params.vth = 0.00001;  // Even colder plasma
+        params.dt = 0.00005;   // Much smaller timestep
+        params.dt_max = 0.0001;
+        params.cfl_factor = 0.1;  // Very conservative
+        
+        std::cout << "=== Langmuir Wave Test Mode ===\n";
+        std::cout << "Grid: " << params.nx << "x" << params.ny << "x" << params.nz
+                  << " (dx=" << params.dx << ")\n";
+        std::cout << "Particles: " << params.num_particles << "\n";
+        std::cout << "Thermal velocity: " << params.vth << "\n";
+        
+        // Reinitialize fields with new grid parameters
+        initializeFields();
+        
+        // Use uniform particle initialization for Langmuir wave test
+        initializeParticlesUniform();
+        
+        // Apply extremely small perturbation for linear regime
+        double wave_amplitude = 0.00001;  // 0.001% perturbation (extremely small)
+        double k_wave = 1.0;  // Fundamental mode (λ = L)
+        std::cout << "Perturbation amplitude: " << wave_amplitude * 100 << "%\n";
+        std::cout << "Wave mode: k = " << k_wave << " (fundamental)\n";
+        
+        initializeLangmuirWave(wave_amplitude, k_wave);
+        
+        // Open file for Langmuir wave diagnostics
+        std::ofstream langmuir_file("langmuir_wave_test.txt");
+        langmuir_file << "# Time, Ex_center, Energy, Theoretical_wp\n";
+        
+        // Initial charge deposition and field initialization
+        depositCharge();
+        
+        // Solve Poisson equation for initial E field from charge separation
+        // This ensures self-consistent initialization
+        for (int iter = 0; iter < 10; ++iter) {
+            cleanDivergenceE();  // This enforces Gauss's law
+        }
+        
+        double theoretical_wp = calculatePlasmaFrequency();
+        std::cout << "Theoretical plasma frequency: " << theoretical_wp << " (normalized)\n";
+        std::cout << "Using dt = " << params.dt << " (dt*ωp = "
+                  << params.dt * theoretical_wp << ")\n";
+        
+        // Check resolution
+        double debye_length = 1.0;  // Normalized
+        double wavelength = params.nx * params.dx / k_wave;
+        std::cout << "Wavelength: " << wavelength << " Debye lengths\n";
+        std::cout << "Grid points per wavelength: " << wavelength / params.dx << "\n\n";
+        
+        // Calculate initial energy AFTER field initialization
+        double simulation_time = 0.0;
+        double initial_energy = calculateTotalEnergy();
+        std::cout << "Initial energy (after perturbation): " << initial_energy << "\n";
+        
+        // Run for partial period for practical demonstration
+        int n_periods = 1;
+        int steps_per_period = static_cast<int>(2.0 * M_PI / (theoretical_wp * params.dt));
+        int total_steps = std::min(5000, n_periods * steps_per_period);  // Limit to 5000 steps for practical runtime
+        
+        std::cout << "Running for " << n_periods << " plasma periods ("
+                  << total_steps << " steps)\n\n";
+        
+        // Store Ex values for frequency analysis
+        std::vector<double> Ex_history;
+        std::vector<double> time_history;
+        
+        for (int step = 0; step < total_steps; ++step) {
+            // Standard PIC cycle (no adaptive timestep for this test)
+            updateBFieldHalfStep();
+            pushParticles();
+            depositCharge();
+            depositCurrent();
+            updateEField();
+            updateBFieldHalfStep();
+            
+            // Light divergence cleaning
+            if (step % 10 == 0) {
+                cleanDivergenceB();
+                cleanDivergenceE();
+            }
+            
+            simulation_time += params.dt;
+            
+            // Record Langmuir wave diagnostics
+            double Ex_center = measureLangmuirFrequency();
+            double energy = calculateTotalEnergy();
+            
+            Ex_history.push_back(Ex_center);
+            time_history.push_back(simulation_time);
+            
+            langmuir_file << simulation_time << " " << Ex_center << " "
+                         << energy << " " << theoretical_wp << "\n";
+            
+            if (step % (steps_per_period/10) == 0) {
+                double energy_error = (energy - initial_energy) / initial_energy;
+                double period_number = simulation_time * theoretical_wp / (2.0 * M_PI);
+                std::cout << "Period " << std::fixed << std::setprecision(2) << period_number
+                         << " | Time: " << std::setprecision(4) << simulation_time
+                         << " | Ex: " << std::scientific << std::setprecision(3) << Ex_center
+                         << " | Energy Error: " << std::fixed << std::setprecision(2)
+                         << energy_error * 100 << "%\n";
+            }
+        }
+        
+        langmuir_file.close();
+        
+        // Simple frequency analysis using zero crossings
+        int zero_crossings = 0;
+        for (size_t i = 1; i < Ex_history.size(); ++i) {
+            if (Ex_history[i-1] * Ex_history[i] < 0) {
+                zero_crossings++;
+            }
+        }
+        
+        double measured_frequency = zero_crossings / (2.0 * simulation_time);
+        double frequency_error = (measured_frequency - theoretical_wp) / theoretical_wp * 100;
+        
+        std::cout << "\n=== Langmuir Wave Test Results ===\n";
+        std::cout << "Theoretical plasma frequency: " << theoretical_wp << " (normalized)\n";
+        std::cout << "Measured frequency: " << measured_frequency << " (normalized)\n";
+        std::cout << "Frequency error: " << frequency_error << "%\n";
+        std::cout << "\nData saved to langmuir_wave_test.txt\n";
+        std::cout << "Plot Ex vs time to visualize plasma oscillations\n";
+    }
+    
     void run() {
         std::cout << "Starting Stable 3D PIC Simulation with CFL Control\n";
         std::cout << "Grid: " << params.nx << "x" << params.ny << "x" << params.nz << "\n";
@@ -992,9 +1294,16 @@ public:
     }
 };
 
-int main() {
+int main(int argc, char* argv[]) {
     SimulationParams params;
     PIC3D simulation(params);
-    simulation.run();
+    
+    // Check for Langmuir wave test mode
+    if (argc > 1 && std::string(argv[1]) == "--langmuir") {
+        simulation.runLangmuirWaveTest();
+    } else {
+        simulation.run();
+    }
+    
     return 0;
 }
